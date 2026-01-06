@@ -21,33 +21,30 @@
 //! - Outputs the RDF data to a specified file or prints it to the console.
 
 use blake3;
+use clap::Error;
 use oxrdf::vocab::xsd;
-use oxrdf::{BlankNode, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, TripleRef};
+use oxrdf::{BlankNode, Literal, NamedNode, NamedNodeRef, Subject, TripleRef};
 
 use serde_json::{Deserializer, Value};
 use std::collections::VecDeque;
-use std::io::{self, Read};
+use std::io::Read;
 use urlencoding;
 
 pub mod writer;
 
 use crate::writer::RdfWriter;
 
-/// Subject enumeration to support both NamedNode and BlankNode as identifiers
-#[derive(Clone)]
+/// Subject enumeration to support both NamedNode and BlankNode
 enum SubjectNode {
-    Named(String),
+    Named(NamedNode),
     Blank(BlankNode),
 }
 
 impl SubjectNode {
-    /// Convert to NamedOrBlankNode for use in RDF triples
-    fn to_named_or_blank_node(&self) -> NamedOrBlankNode {
+    fn as_ref(&self) -> Subject {
         match self {
-            SubjectNode::Named(uri) => {
-                NamedOrBlankNode::NamedNode(NamedNode::new(uri.clone()).unwrap())
-            }
-            SubjectNode::Blank(bn) => NamedOrBlankNode::BlankNode(bn.clone()),
+            SubjectNode::Named(n) => Subject::NamedNode(n.clone()),
+            SubjectNode::Blank(b) => Subject::BlankNode(b.clone()),
         }
     }
 }
@@ -86,7 +83,7 @@ pub fn json_to_rdf<R: Read>(
     reader: R,
     writer: &mut dyn RdfWriter,
     namespace: &Option<String>,
-) -> Result<(), io::Error> {
+) -> Result<(), Error> {
     let default_namespace = "https://purl.org/wiser/json2rdf/model".to_owned();
     let rdf_namespace: String = if let Some(ns) = namespace {
         ns.clone()
@@ -108,7 +105,7 @@ pub fn json_to_rdf<R: Read>(
                     is_root = false;
                     // For the root node, create a NamedNode using blake3 hash
                     let json_str = serde_json::to_string(&obj)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                        .map_err(|_| Error::raw(clap::error::ErrorKind::Io, "JSON serialization failed"))?;
                     let hash = blake3::hash(json_str.as_bytes());
                     let hash_hex = hash.to_hex();
                     let root_uri = format!(
@@ -116,7 +113,10 @@ pub fn json_to_rdf<R: Read>(
                         rdf_namespace.trim_end_matches('/').trim_end_matches('#'),
                         hash_hex
                     );
-                    SubjectNode::Named(root_uri)
+                    SubjectNode::Named(
+                        NamedNode::new(root_uri)
+                            .map_err(|_| Error::raw(clap::error::ErrorKind::Io, "Invalid URI"))?
+                    )
                 } else {
                     SubjectNode::Blank(BlankNode::default())
                 };
@@ -202,14 +202,13 @@ fn process_value(
         &([namespace, "/"].join(""))
     };
 
-    if let Some(last_subject) = subject_stack.back().cloned() {
+    if let Some(last_subject) = subject_stack.clone().back() {
         if let Some(prop) = property {
             match value {
                 Value::Bool(b) => {
                     let literal = Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN);
-                    let subject_nob = last_subject.to_named_or_blank_node();
                     let triple = TripleRef::new(
-                        &subject_nob,
+                        &last_subject.as_ref(),
                         NamedNodeRef::new(prop.as_str()).unwrap(),
                         &literal,
                     );
@@ -223,9 +222,8 @@ fn process_value(
                     } else {
                         return;
                     };
-                    let subject_nob = last_subject.to_named_or_blank_node();
                     let triple = TripleRef::new(
-                        &subject_nob,
+                        &last_subject.as_ref(),
                         NamedNodeRef::new(prop.as_str()).unwrap(),
                         &literal,
                     );
@@ -233,9 +231,8 @@ fn process_value(
                 }
                 Value::String(s) => {
                     let literal = Literal::new_typed_literal(s, xsd::STRING);
-                    let subject_nob = last_subject.to_named_or_blank_node();
                     let triple = TripleRef::new(
-                        &subject_nob,
+                        &last_subject.as_ref(),
                         NamedNodeRef::new(prop.as_str()).unwrap(),
                         &literal,
                     );
@@ -246,14 +243,12 @@ fn process_value(
                 }
                 Value::Object(obj) => {
                     let subject = SubjectNode::Blank(BlankNode::default());
-                    subject_stack.push_back(subject.clone());
+                    subject_stack.push_back(subject);
 
-                    let last_subject_nob = last_subject.to_named_or_blank_node();
-                    let new_subject_nob = subject.to_named_or_blank_node();
                     let triple = TripleRef::new(
-                        &last_subject_nob,
+                        &last_subject.as_ref(),
                         NamedNodeRef::new(prop.as_str()).unwrap(),
-                        &new_subject_nob,
+                        &subject_stack.back().unwrap().as_ref(),
                     );
                     writer.add_triple(triple).unwrap();
 
