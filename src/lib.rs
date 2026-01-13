@@ -71,16 +71,18 @@ impl SubjectNode {
 /// use std::fs::File;
 /// use std::io::Read;
 ///
-/// // From a file:
-/// let file = File::open("data.json")?;
-/// let mut w = writer::FileWriter::to_vec();
-/// json_to_rdf(Box::new(file), &mut w, &Some("http://example.com/ns#".to_string()));
+/// fn run() -> Result<(), Box<dyn std::error::Error>> {
+///     // Use an in-memory JSON string and a GraphWriter for the example so the doctest
+///     // doesn't depend on an external file existing during test runs.
+///     use std::io::Cursor;
+///     let json_data = r#"{"key": "value"}"#;
+///     let mut g = Graph::new();
+///     let mut w = writer::GraphWriter::new(&mut g);
+///     json_to_rdf(Cursor::new(json_data.as_bytes()), &mut w, &Some("http://example.com/ns#".to_string()))?;
+///     Ok(())
+/// }
 ///
-/// // From an in-memory string:
-/// let json_data = r#"{"key": "value"}"#.as_bytes();
-/// let mut g = Graph::new();
-/// let mut w = writer::GraphWriter::new(&mut g);
-/// json_to_rdf(Box::new(json_data), &mut w, &Some("http://example.com/ns#".to_string()));
+/// run().unwrap();
 /// ```
 pub fn json_to_rdf<R: Read>(
     reader: R,
