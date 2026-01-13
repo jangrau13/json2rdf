@@ -20,7 +20,6 @@
 //! - Generates a blake3-hashed named node for the root JSON object.
 //! - Outputs the RDF data to a specified file or prints it to the console.
 
-use blake3;
 use oxrdf::vocab::xsd;
 use oxrdf::{BlankNode, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, TripleRef};
 
@@ -28,10 +27,21 @@ use serde_json::{Deserializer, Value};
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use urlencoding;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 pub mod writer;
 
 use crate::writer::RdfWriter;
+
+/// Compute a stable hash of a string that doesn't depend on RNG
+/// This replaces blake3::hash which fails in WASM with thread-local RNG issues
+fn compute_stable_hash(input: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    let hash_value = hasher.finish();
+    format!("{:x}", hash_value)
+}
 
 /// Normalizes a namespace URI to have a consistent format.
 /// Ensures it ends with either '#' or '/' and is a valid URI.
@@ -123,17 +133,17 @@ pub fn json_to_rdf<R: Read>(
     let mut subject_stack: VecDeque<SubjectNode> = VecDeque::new();
     let mut property: Option<String> = None;
     let mut is_root = true;
+    let mut blank_node_counter: u64 = 0;
 
     for value in stream {
         match value {
             Ok(Value::Object(obj)) => {
                 let subject = if is_root {
                     is_root = false;
-                    // For the root node, create a NamedNode using blake3 hash
+                    // For the root node, create a NamedNode using stable hash (no RNG dependency)
                     let json_str = serde_json::to_string(&obj)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    let hash = blake3::hash(json_str.as_bytes());
-                    let hash_hex = hash.to_hex();
+                    let hash_hex = compute_stable_hash(&json_str);
                     let root_uri = format!(
                         "{}#{}",
                         rdf_namespace.trim_end_matches('#'),
@@ -141,7 +151,10 @@ pub fn json_to_rdf<R: Read>(
                     );
                     SubjectNode::Named(root_uri)
                 } else {
-                    SubjectNode::Blank(BlankNode::default())
+                    // Create deterministic blank node ID using counter (no RNG)
+                    let bn_id = format!("b{}", blank_node_counter);
+                    blank_node_counter += 1;
+                    SubjectNode::Blank(BlankNode::new(bn_id).unwrap())
                 };
                 subject_stack.push_back(subject);
 
@@ -153,6 +166,7 @@ pub fn json_to_rdf<R: Read>(
                         val,
                         writer,
                         &rdf_namespace,
+                        &mut blank_node_counter,
                     );
                 }
 
@@ -166,6 +180,7 @@ pub fn json_to_rdf<R: Read>(
                         val,
                         writer,
                         &rdf_namespace.clone(),
+                        &mut blank_node_counter,
                     );
                 }
             }
@@ -176,6 +191,7 @@ pub fn json_to_rdf<R: Read>(
                     other,
                     writer,
                     &rdf_namespace.clone(),
+                    &mut blank_node_counter,
                 );
             }
             Err(e) => {
@@ -266,6 +282,7 @@ fn process_value(
     value: Value,
     writer: &mut dyn RdfWriter,
     namespace: &String,
+    blank_node_counter: &mut u64,
 ) {
     // Normalize namespace to ensure consistent formatting with '#' separator
     let normalized_ns = normalize_namespace(namespace);
@@ -313,7 +330,10 @@ fn process_value(
                     //println!("Null value");
                 }
                 Value::Object(obj) => {
-                    let subject = SubjectNode::Blank(BlankNode::default());
+                    // Create deterministic blank node ID using counter (no RNG)
+                    let bn_id = format!("b{}", blank_node_counter);
+                    *blank_node_counter += 1;
+                    let subject = SubjectNode::Blank(BlankNode::new(bn_id).unwrap());
                     subject_stack.push_back(subject.clone());
 
                     let last_subject_nob = last_subject.to_named_or_blank_node();
@@ -327,13 +347,13 @@ fn process_value(
 
                     for (key, val) in obj {
                         let nested_property: Option<String> = Some(create_property_uri(&normalized_ns, &key));
-                        process_value(subject_stack, &nested_property, val, writer, &normalized_ns);
+                        process_value(subject_stack, &nested_property, val, writer, &normalized_ns, blank_node_counter);
                     }
                     subject_stack.pop_back();
                 }
                 Value::Array(arr) => {
                     for val in arr {
-                        process_value(subject_stack, property, val, writer, &normalized_ns);
+                        process_value(subject_stack, property, val, writer, &normalized_ns, blank_node_counter);
                     }
                 }
             }
