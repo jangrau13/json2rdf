@@ -33,6 +33,29 @@ pub mod writer;
 
 use crate::writer::RdfWriter;
 
+/// Normalizes a namespace URI to have a consistent format.
+/// Ensures it ends with either '#' or '/' and is a valid URI.
+fn normalize_namespace(ns: &str) -> String {
+    let trimmed = ns.trim();
+    if trimmed.is_empty() {
+        return "https://purl.org/wiser/json2rdf/model#".to_string();
+    }
+
+    // Remove trailing slashes and hashes
+    let base = trimmed.trim_end_matches('/').trim_end_matches('#');
+
+    // Prefer '#' as the separator for RDF properties
+    format!("{}#", base)
+}
+
+/// Creates a property URI with proper encoding and namespace formatting.
+fn create_property_uri(namespace: &str, property_name: &str) -> String {
+    let normalized_ns = normalize_namespace(namespace);
+    // Remove the trailing '#' temporarily, we'll add the encoded property name after
+    let base_ns = normalized_ns.trim_end_matches('#');
+    format!("{}#{}", base_ns, urlencoding::encode(property_name))
+}
+
 /// Subject enumeration to support both NamedNode and BlankNode as identifiers
 #[derive(Clone)]
 enum SubjectNode {
@@ -90,11 +113,9 @@ pub fn json_to_rdf<R: Read>(
     namespace: &Option<String>,
 ) -> Result<(), io::Error> {
     let default_namespace = "https://purl.org/wiser/json2rdf/model".to_owned();
-    let rdf_namespace: String = if let Some(ns) = namespace {
-        ns.clone()
-    } else {
-        default_namespace
-    };
+    let rdf_namespace: String = normalize_namespace(
+        namespace.as_ref().unwrap_or(&default_namespace)
+    );
 
     let buf_reader = std::io::BufReader::new(reader);
     let stream = Deserializer::from_reader(buf_reader).into_iter::<Value>();
@@ -115,7 +136,7 @@ pub fn json_to_rdf<R: Read>(
                     let hash_hex = hash.to_hex();
                     let root_uri = format!(
                         "{}#{}",
-                        rdf_namespace.trim_end_matches('/').trim_end_matches('#'),
+                        rdf_namespace.trim_end_matches('#'),
                         hash_hex
                     );
                     SubjectNode::Named(root_uri)
@@ -125,7 +146,7 @@ pub fn json_to_rdf<R: Read>(
                 subject_stack.push_back(subject);
 
                 for (key, val) in obj {
-                    property = Some(format!("{}/{}", rdf_namespace, urlencoding::encode(&key)));
+                    property = Some(create_property_uri(&rdf_namespace, &key));
                     process_value(
                         &mut subject_stack,
                         &property,
@@ -191,6 +212,54 @@ pub fn json_to_rdf<R: Read>(
 /// - **String**: Converts to `xsd:string` literal.
 /// - **Boolean**: Converts to `xsd:boolean` literal.
 /// - **Number**: Converts to `xsd:int` or `xsd:float` literal based on value type.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_namespace_with_trailing_slash() {
+        let result = normalize_namespace("https://example.com/");
+        assert_eq!(result, "https://example.com#");
+    }
+
+    #[test]
+    fn test_normalize_namespace_with_trailing_hash() {
+        let result = normalize_namespace("https://example.com#");
+        assert_eq!(result, "https://example.com#");
+    }
+
+    #[test]
+    fn test_normalize_namespace_without_trailing() {
+        let result = normalize_namespace("https://example.com");
+        assert_eq!(result, "https://example.com#");
+    }
+
+    #[test]
+    fn test_normalize_namespace_empty() {
+        let result = normalize_namespace("");
+        assert_eq!(result, "https://purl.org/wiser/json2rdf/model#");
+    }
+
+    #[test]
+    fn test_create_property_uri_simple() {
+        let result = create_property_uri("https://example.com#", "propertyName");
+        assert_eq!(result, "https://example.com#propertyName");
+    }
+
+    #[test]
+    fn test_create_property_uri_with_special_chars() {
+        let result = create_property_uri("https://example.com", "property Name");
+        assert_eq!(result, "https://example.com#property%20Name");
+    }
+
+    #[test]
+    fn test_create_property_uri_with_trailing_slash() {
+        let result = create_property_uri("https://example.com/", "propertyName");
+        assert_eq!(result, "https://example.com#propertyName");
+    }
+}
+
 fn process_value(
     subject_stack: &mut VecDeque<SubjectNode>,
     property: &Option<String>,
@@ -198,11 +267,8 @@ fn process_value(
     writer: &mut dyn RdfWriter,
     namespace: &String,
 ) {
-    let ns = if namespace.ends_with("/") {
-        namespace
-    } else {
-        &([namespace, "/"].join(""))
-    };
+    // Normalize namespace to ensure consistent formatting with '#' separator
+    let normalized_ns = normalize_namespace(namespace);
 
     if let Some(last_subject) = subject_stack.back().cloned() {
         if let Some(prop) = property {
@@ -260,14 +326,14 @@ fn process_value(
                     writer.add_triple(triple).unwrap();
 
                     for (key, val) in obj {
-                        let nested_property: Option<String> = Some(format!("{}{}", ns, urlencoding::encode(&key)));
-                        process_value(subject_stack, &nested_property, val, writer, ns);
+                        let nested_property: Option<String> = Some(create_property_uri(&normalized_ns, &key));
+                        process_value(subject_stack, &nested_property, val, writer, &normalized_ns);
                     }
                     subject_stack.pop_back();
                 }
                 Value::Array(arr) => {
                     for val in arr {
-                        process_value(subject_stack, property, val, writer, ns);
+                        process_value(subject_stack, property, val, writer, &normalized_ns);
                     }
                 }
             }
